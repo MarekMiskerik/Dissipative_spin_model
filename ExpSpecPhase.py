@@ -1,0 +1,44 @@
+from qutip import *
+import numpy as np
+import matplotlib.pyplot as plt
+
+'''https://doi.org/10.1103/PhysRevA.106.L010201'''
+
+## Define parameters
+j = 10 # total spin
+N = 2*j + 1 # number of particles considering j = j_MAX
+
+h = 1.0 # 'external magnetic field' strength
+C0 = 0.0 # parameters of the dissipations strength, denoted Gamma in the paper
+C = 1.0
+p = 0.0 # degree of polarization in the bath
+
+
+## Define operators
+# angular momentum operators acting on the left on Fock-Liouville (FL) space  
+K1z = spre(jmat(j, 'z'))
+K1p = spre(jmat(j, '+'))
+K1m = spre(jmat(j, '-'))
+
+# angular momentum operators acting on the right on Fock-Liouville (FL) space
+K2z = spost(jmat(j, 'z').dag())
+K2p = spost(jmat(j, '+').dag())
+K2m = spost(jmat(j, '-').dag())
+
+# define Liovillian on FL space
+Kzm = K1z - K2z
+Kzp = K1z + K2z
+Kz = K1z * K2z
+Kp = K1p * K2p
+Km = K1m * K2m
+L = - C * (j + 1) + 1j * h * Kzm + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
+
+
+##Compute and visualize the spectrum of the Liouvillian
+evals = L.eigenenergies()
+
+plt.scatter(evals.real / j, evals.imag / j, color='black', s=4)
+plt.xlabel('Real Part')
+plt.ylabel('Imaginary Part')
+plt.title('Spectrum of the Liouvillian')
+plt.show()
