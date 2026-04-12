@@ -11,7 +11,7 @@ N = 2*j + 1 # number of particles considering j = j_MAX
 h = 1.0 # 'external magnetic field' strength
 C0 = 0.0 # parameters of the dissipations strength, denoted Gamma in the paper
 C = 1.0
-p = 0.0 # degree of polarization in the bath
+p = 0.99 # degree of polarization in the bath
 
 
 ## Define operators
@@ -34,11 +34,38 @@ Km = K1m * K2m
 L = - C * (j + 1) + 1j * h * Kzm + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
 
 
-##Compute and visualize the spectrum of the Liouvillian
+## Compute and visualize the spectrum of the Liouvillian
 evals = L.eigenenergies()
 
-plt.scatter(evals.real / j, evals.imag / j, color='black', s=4)
+'''plt.scatter(evals.real / j, evals.imag / j, color='black', s=4)
 plt.xlabel('Real Part')
 plt.ylabel('Imaginary Part')
 plt.title('Spectrum of the Liouvillian')
+plt.show()'''
+
+## Separating spectrum into exceptional and normal points to see the Liouvillian spectral phase transition (LSPT)
+expvals = np.array([])
+normvals = np.array([])
+
+for a in evals:
+    normal = True
+    i = 0
+    while normal == True and i < len(evals):
+        if abs(a - evals[i]) < 1e-1 and a != evals[i]:
+            normal = False
+        i += 1
+    if normal:
+        normvals = np.append(normvals, a)
+    else:
+        expvals = np.append(expvals, a)
+
+print(expvals)
+#print(normvals)
+
+plt.scatter(expvals.real / j, expvals.imag / j, color='red', s=4)
+plt.scatter(normvals.real / j, normvals.imag / j, color='blue', s=4)
+plt.xlabel('Real Part')
+plt.ylabel('Imaginary Part')
+plt.title('Spectrum of the Liouvillian with the LSPT')
 plt.show()
+            
