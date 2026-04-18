@@ -7,17 +7,22 @@ import time
 '''https://doi.org/10.1103/PhysRevA.106.L010201'''
 
 ## Define parameters
-j = 10 # total spin
+j = 20 # total spin
 N = 2*j + 1 # number of particles considering j = j_MAX
 
-p = 0.99
+p = 0.0
 
-def L(j, p, h = 1.0, C = 1.0, C0 = 0.0):
+# define the Liouvillian superoperator L
+# a is parametr of interaction strength in Hamiltonian
+# parameters C, C0, p are related to the dissipation
+def L(j, p, h = 1.0, C = 1.0, C0 = 0.0, a = 0.2):
     K1z = spre(jmat(j, 'z'))
+    K1x = spre(jmat(j, 'x'))
     K1p = spre(jmat(j, '+'))
     K1m = spre(jmat(j, '-'))
 
     K2z = spost(jmat(j, 'z').dag())
+    K2x = spost(jmat(j, 'x').dag())
     K2p = spost(jmat(j, '+').dag())
     K2m = spost(jmat(j, '-').dag())
 
@@ -26,7 +31,7 @@ def L(j, p, h = 1.0, C = 1.0, C0 = 0.0):
     Kz = K1z * K2z
     Kp = K1p * K2p
     Km = K1m * K2m
-    return - C * (j + 1) + 1j * h * Kzm + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
+    return - C * (j + 1) - 1j * h * Kzm + 1j * a / j * (K1x**2 - K2x**2) + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
 # care about the type of object it returns. it should be a superoperator
 
 ## Compute and visualize the spectrum of the Liouvillian
@@ -37,6 +42,34 @@ def Km(j):
     K1z = spre(jmat(j, 'z'))
     K2z = spost(jmat(j, 'z').dag())
     return K1z - K2z
+
+# operator K^2 = K_1^2 * K_2^2 or tensor product of J^2 and (J^2)^T
+# this operator is a strong symmetry because J^2 on Hilbert space commutes with H and all L_i
+def Ksq(j):
+    J2x = jmat(j, 'x')**2
+    J2y = jmat(j, 'y')**2
+    J2z = jmat(j, 'z')**2
+    J2 = J2x + J2y + J2z
+    Ksq1 = spre(J2)
+    Ksq2 = spost(J2.dag())
+    return Ksq1 * Ksq2
+
+# operator K^2+ = K_1^2 + K_2^2
+# this operator is a weak symmetry
+# eigenvalues should go from 0,..., j^2
+# propably a good candidate to find the block structure of the Liouvillian
+def Ksqp(j):
+    J2x = jmat(j, 'x')**2
+    J2y = jmat(j, 'y')**2
+    J2z = jmat(j, 'z')**2
+    J2 = J2x + J2y + J2z
+    Ksq1 = spre(J2)
+    Ksq2 = spost(J2.dag())
+    return Ksq1 + Ksq2
+
+#print(L(j,p))
+#print(Ksq(j))
+#print(Ksqp(j))
 
 # diagonalize operator L in blocks given by the eigenvalues of operator K assuming [L,K] = 0, not very general yet
 # should add something that finds the sizes of the blocks for general K
@@ -63,8 +96,8 @@ def block_eigvals(L, K):
     return np.concatenate(evals)
 
 start = time.time()
-#evals = block_eigvals(L(j,p), Km(j))
-evals = L(j,p).eigenenergies()
+evals = block_eigvals(L(j,p), Km(j))
+#evals = L(j,p).eigenenergies()
 end = time.time()
 print("Time taken to compute the spectrum: ", end - start)
 
