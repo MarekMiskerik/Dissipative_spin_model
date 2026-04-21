@@ -10,12 +10,13 @@ import time
 j = 20 # total spin
 N = 2*j + 1 # number of particles considering j = j_MAX
 
-p = 0.0
+p = 0.99
 
 # define the Liouvillian superoperator L
 # a is parametr of interaction strength in Hamiltonian
 # parameters C, C0, p are related to the dissipation
-def L(j, p, h = 1.0, C = 1.0, C0 = 0.0, a = 0.2):
+# critical point a_c = h/2
+def L(j, p, h = 1.0, C = 1.0, C0 = 0.1, a = 0.6):
     K1z = spre(jmat(j, 'z'))
     K1x = spre(jmat(j, 'x'))
     K1p = spre(jmat(j, '+'))
@@ -31,11 +32,12 @@ def L(j, p, h = 1.0, C = 1.0, C0 = 0.0, a = 0.2):
     Kz = K1z * K2z
     Kp = K1p * K2p
     Km = K1m * K2m
-    return - C * (j + 1) - 1j * h * Kzm + 1j * a / j * (K1x**2 - K2x**2) + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
+    # the term 1j * a / j * (K1x**2 - K2x**2) corresponds to interaction of spins
+    #return - C * (j + 1) - 1j * h * Kzm + 1j * a / j * (K1x**2 - K2x**2) + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
+    return - C * (j + 1) - 1j * h * Kzm + C / j * Kz + (C - C0) * 0.5 / j * Kzm**2 - C * 0.5 * p / j * Kzp + C * (1 - p) * 0.5 / j * Kp + C * (1 + p) * 0.5 / j * Km
 # care about the type of object it returns. it should be a superoperator
 
 ## Compute and visualize the spectrum of the Liouvillian
-#evals = L(j,p).eigenenergies()
 
 # defining an operator Km = K1z - K2z to find the block structure of the Liouvillian as [L, Km] = 0
 def Km(j):
@@ -54,10 +56,8 @@ def Ksq(j):
     Ksq2 = spost(J2.dag())
     return Ksq1 * Ksq2
 
-# operator K^2+ = K_1^2 + K_2^2
+# operator K_p^2= K_1^2 + K_2^2
 # this operator is a weak symmetry
-# eigenvalues should go from 0,..., j^2
-# propably a good candidate to find the block structure of the Liouvillian
 def Ksqp(j):
     J2x = jmat(j, 'x')**2
     J2y = jmat(j, 'y')**2
@@ -67,6 +67,22 @@ def Ksqp(j):
     Ksq2 = spost(J2.dag())
     return Ksq1 + Ksq2
 
+# NOTE: both Ksq and Ksqp useless for block diagonalization of L as we are restrected to j = const.
+#       not used below
+
+# returns function f as an operator function f(A)
+# second argument needs to be specified as a lambda expression
+def oper_func(A, f):
+    evals, eigvecs = A.eigenstates()
+    fA = sum([f(evals[i]) * eigvecs[i] * eigvecs[i].dag() for i in range(len(evals))])
+    return fA
+
+# parity operator (-1)^(J_z + j) extended to the superoperator space
+# commutes with L
+def P(j):
+    Parity = oper_func(jmat(j, 'z'), lambda x: 1 if x % 2 == 0 else -1)
+    return spre(Parity) * spost(Parity.dag())
+
 #print(L(j,p))
 #print(Ksq(j))
 #print(Ksqp(j))
@@ -74,7 +90,13 @@ def Ksqp(j):
 # diagonalize operator L in blocks given by the eigenvalues of operator K assuming [L,K] = 0, not very general yet
 # should add something that finds the sizes of the blocks for general K
 def block_eigvals(L, K):
+    # verify that L and K commute
+    comm_norm = commutator(L, K).norm() # by default qutip takes trace norm Tr(sqrt(A.dag() * A))
+    if comm_norm > 1e-10:
+        raise ValueError("Operators do not commute")
     evalsK, eigvecsK = K.eigenstates()
+
+    #print(evalsK)
     L_M = L.transform(eigvecsK) # matrix representation of L in the basis of eigenvectors of K
     L_M = L_M.full() # convert to numpy array
 
@@ -85,7 +107,7 @@ def block_eigvals(L, K):
     _, block_sizes = np.unique(rounded_evalsK, return_counts=True) # 2nd argument returns the counts of each unique value
     #print(block_sizes)
     
-    # loop to find the eigenvalues of each block
+    # loop to find the eigenvalues for each block
     n = 0
     for size in block_sizes:
         block = L_M[n:n+size, n:n+size]
@@ -95,17 +117,52 @@ def block_eigvals(L, K):
 
     return np.concatenate(evals)
 
+# same as above but with mpmath for higher precision
+def block_eigvals_pre(L, K, precision = 50):
+    import mpmath
+    mpmath.mp.dps = precision
+    # verify that L and K commute
+    comm_norm = commutator(L, K).norm() # by default qutip takes trace norm Tr(sqrt(A.dag() * A))
+    if comm_norm > 1e-10:
+        raise ValueError("Operators do not commute")
+    evalsK, eigvecsK = K.eigenstates()
+
+    #print(evalsK)
+    L_M = L.transform(eigvecsK) # matrix representation of L in the basis of eigenvectors of K
+    L_M = L_M.full() # convert to numpy array
+
+    evals = [] # array to store the eigenvalues of L
+
+    # finding the sizes of the blocks by couting the unique eigenvalues of K
+    rounded_evalsK = np.round(evalsK, decimals=5) # round to avoid numerical issues with very close eigenvalues
+    _, block_sizes = np.unique(rounded_evalsK, return_counts=True) # 2nd argument returns the counts of each unique value
+    #print(block_sizes)
+    
+    # loop to find the eigenvalues for each block
+    n = 0
+    for size in block_sizes:
+        block = L_M[n:n+size, n:n+size]
+        block = mpmath.matrix(block)
+        evals_block, _ = mpmath.eig(block)
+        evals.append(evals_block)
+        n += size
+
+    all_evals = np.concatenate(evals)
+
+    return np.array([complex(val) for val in all_evals])
+
 start = time.time()
-evals = block_eigvals(L(j,p), Km(j))
+#evals = block_eigvals(L(j,p), P(j))
+evals = block_eigvals_pre(L(j,p), Km(j), precision = 32)
 #evals = L(j,p).eigenenergies()
 end = time.time()
 print("Time taken to compute the spectrum: ", end - start)
 
-plt.scatter(evals.real / j, evals.imag / j, color='black', s=4)
+'''plt.scatter(evals.real / j, evals.imag / j, color='black', s=4)
 plt.xlabel('Real Part')
 plt.ylabel('Imaginary Part')
 plt.title('Spectrum of the Liouvillian')
-plt.show()
+plt.show()'''
 
 ## Separating spectrum into exceptional and normal points to see the Liouvillian spectral phase transition (LSPT)
 def spec_separation(evals, threshold): # the threshold should decrease with the system size
@@ -126,7 +183,7 @@ def spec_separation(evals, threshold): # the threshold should decrease with the 
     
     return excvals, normvals
 
-excvals, normvals = spec_separation(evals, 5*1e-2)
+excvals, normvals = spec_separation(evals, 1e-2)
 
 #print(expvals)
 #print(normvals)
