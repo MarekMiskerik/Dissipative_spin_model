@@ -240,21 +240,22 @@ def plot_fixed_points(a, c, h = 1):
 
 
 # Compute the eigenvalues of the Liouvillian correcpoing to a given fixed point using the Jacobian eigenlvaues 
-def liouvillian_eigenvalues(J_eigenvalues, n_max, saddle):
-    '''if saddle:
-        if J_eigenvalues[0] > 0 or J_eigenvalues[1] > 0:
-            return np.array([0])
+def liouvillian_eigenvalues(J_eigenvalues, n_max, saddle, skip = 0): # if saddle is True, then consider eigenvalues of a saddle fixed point as well
+    if len(J_eigenvalues) < 2:
+        s = [n * J_eigenvalues[0] for n in range(n_max + 1)]
+        return np.array(s)
+    if saddle:
+        if J_eigenvalues[0] > 0 and J_eigenvalues[1] > 0:
+            return [0]
         else:
             s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
             return np.array(s)
     else:
-        if J_eigenvalues[0] > 0 and J_eigenvalues[1] > 0:
-            return np.array([0])
+        if J_eigenvalues[0] > 0 or J_eigenvalues[1] > 0:
+            return [0]
         else:
             s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
-            return np.array(s)'''
-    s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
-    return np.array(s)
+            return np.array(s)
 
 # another fucntion to convenietnly print some info about the fixed points, their Jacobian eigenvalues or their character
 def print_fixed_points_info(fixed_points, a, c):
@@ -269,12 +270,12 @@ def print_fixed_points_info(fixed_points, a, c):
 
 
 
-c = 2
+c = -2
 
 h = 1
 a_c = (h**2 + c**2)/(2*h)
 
-a = c - 0.001
+a = 2.5
 
 #solve_and_plt_ODR(a, c, steps=2000, t_max=200)
 
@@ -285,40 +286,6 @@ a = c - 0.001
 # block below computes and plots the Liouvillian eigenvalues corresponding fixed points using the fucntions 'louvillian_eigenvalues'
 fixed_points = find_fixed_points(a=a, c=c)
 print_fixed_points_info(fixed_points, a, c)
-'''N_val = 6
-
-all_L_evals = []  
-
-plt.figure(figsize=(8, 8))
-
-for i, point in enumerate(fixed_points):
-    J_evals = Jacobian_eigenvalues(point, a=a, c=c)
-    
-    current_L_evals = liouvillian_eigenvalues(J_evals, N_val, saddle=False)
-    all_L_evals.append(current_L_evals)
-    
-    # Plot inside the loop to get a unique color per fixed point
-    plt.scatter(current_L_evals.real, current_L_evals.imag, 
-                marker='o', alpha=0.5)#, label=f'Fixed Point {i+1}')
-
-# Keep the concatenation in case you need all_L_evals later in your script
-all_L_evals = np.concatenate(all_L_evals)
-
-# Add axes lines through the origin
-plt.axhline(y=0, color='k', linestyle='-', linewidth=1)
-plt.axvline(x=0, color='k', linestyle='-', linewidth=1)
-
-#plt.title('Liouvillian Eigenvalues - All Fixed Points')
-plt.xlabel('Real Part')
-plt.ylabel('Imaginary Part')
-plt.grid(True, linestyle='--', alpha=0.6)
-
-# Display the legend to show the color mapping
-plt.legend()
-
-plt.gca().set_aspect('equal', adjustable='datalim')
-
-plt.show()'''
 
 
 # block below plots fixed points in spherical coordinates (theta, phi) for a range of a values, with color indicating the value of a
@@ -333,8 +300,8 @@ def cartesian_to_spherical(j1, j2, j3):
     
     return theta, phi
 
-'''
-aa = np.linspace(0, 2.3, 10)
+
+'''aa = np.linspace(0, 2.3, 10)
 phi_plot = []
 theta_plot = []
 a_colors = []

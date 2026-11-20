@@ -395,6 +395,9 @@ def visualize_block_diagonalization(L, K, j):
 # convert a QuTiP superoperator to a scipy sparse matrix (works for QuTiP 4 and 5)
 def to_sparse(L):
     try:
+        # .to('csr') coverts QuTiP 5 superoperator to a compressed sparse row matrix but leave it as a QuTiP object
+        # .data_as('csr_matrix') converts the QuTiP object to a scipy sparse matrix
+        # can probably use onlt data_as('csr_matrix') but this is safer
         return L.to('csr').data_as('csr_matrix')  # QuTiP 5
     except AttributeError:
         return L.data  # QuTiP 4, already a scipy csr matrix
@@ -429,15 +432,23 @@ def plot_low_lying(L, k, sigma=1e-3, compare_full=False):
 
 '''function imported from 'classical_dynamics.py' to compute the eigenvalues of the Liouvillian from the eigenvalues of the Jacobian at a fixed point'''
 def liouvillian_eigenvalues(J_eigenvalues, n_max, saddle): # if saddle is True, then consider eigenvalues of a saddle fixed point as well
+    if len(J_eigenvalues) < 2:
+        if J_eigenvalues[0].real > 0:
+            return np.array([0])
+        else:
+            s = [n * J_eigenvalues[0] for n in range(n_max + 1)]
+            return np.array(s)
     if saddle:
-        if J_eigenvalues[0] > 0 and J_eigenvalues[1] > 0:
-            return [0]
+        if J_eigenvalues[0].real > 0 and J_eigenvalues[1].real > 0:
+            return np.array([0])
         else:
             s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
             return np.array(s)
     else:
-        if J_eigenvalues[0] > 0 or J_eigenvalues[1] > 0:
-            return [0]
+        if J_eigenvalues[0].real > 0 or J_eigenvalues[1].real > 0:
+            #s = [-n1 * J_eigenvalues[0] - n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
+            #return np.array(s)
+            return np.array([0])
         else:
             s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
             return np.array(s)
@@ -518,95 +529,72 @@ def plot_spectrum(evals, scale=1.0, ax=None, color='blue', s=30, filled=True,
 j = 100
 
 a = 0.3
-C = 0.505050
+C = 0.5050505050505050
 p = 0.99
-
-'''a = 2.3
-C = 2.0202
-p = 0.99'''
 
 L = Liouvillian(s = j, h = 1.0, C = C, p = p, C0 = 0.0, a = a)
 
 #plot_low_lying(L, k=40, compare_full=False)  # compare_full=True is a check for small j
-
 
 c = C * p
 
 saddle = True
 k = 60 # number of low-lying eigenvalues to compute from the Liouvillian
 
-N_val = 9 # corresponds to a number of eigenvalues to compute from the semiclassical spectrum
-abs_threshold = 4 # threshold for the absolute value of eigenvalues to keep in the semiclassical spectrum
-
-
-#visualize_block_diagonalization(L, P(j), j)
-#spectrum_coincidences_plotting(L, j, 1e-2, 1e-2)
-'''block_diagonalization(L, P(j), precision=16)
-
-plt.scatter(L.eigenenergies().real / j, L.eigenenergies().imag / j, color='blue', s=4)
-plt.xlabel('Real Part')
-plt.ylabel('Imaginary Part')
-plt.show()'''
-
-
+N_val = 10 # corresponds to a number of eigenvalues to compute from the semiclassical spectrum
+abs_threshold = 10 # threshold for the absolute value of eigenvalues to keep in the semiclassical spectrum
 
 
 # block below plots both the low-lying spectrum of the Liouvillian and the semiclassical spectrum obtained from the fixed points of the classical dynamics
 # written by Claude
 fixed_points = find_fixed_points(a=a, c=c)
+#fixed_points = np.delete(fixed_points, 1)
 
 all_L_evals = []  
 
-  # keep only eigenvalues with |lambda| < abs_threshold
-
-for point in fixed_points:
-    J_evals = Jacobian_eigenvalues(point, a=a, c=c)
-    
-    current_L_evals = liouvillian_eigenvalues(J_evals, N_val, saddle)
-    all_L_evals.append(current_L_evals)
-
-all_L_evals = np.concatenate(all_L_evals)
-all_L_evals = all_L_evals[np.abs(all_L_evals) < abs_threshold]  # remove large eigenvalues
-
 evals_num = low_lying_spectrum(L, k=k)
 
-plt.figure(figsize=(8, 8))
+evals_coincidences, evals_non_coincidences = spec_separation(evals_num, threshold=1e-2)
 
-# 1. Plot the numerics first
-plot_spectrum(evals_num, color='red', s=25, label=f'numerics, j = {j}',
-              title='Low-lying Liouvillian spectrum: numerics vs. semiclassics')
+def plot_comparison(evals_num, fixed_points, a, c, N_val, saddle, abs_threshold, j, C, p, save):
+    plt.figure(figsize=(8, 8))
 
-# Define a list of distinct colors (avoiding red, which is used for numerics)
-fp_colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown']
+    plot_spectrum(evals_num, color='red', s=25, label=f'numerics, j = {j}',
+                  title='Low-lying Liouvillian spectrum: numerics vs. semiclassics')
 
-all_L_evals = [] 
+    fp_colors = ['blue', 'green', 'black', 'orange', 'olive', 'magenta', 'brown']
 
-for i, point in enumerate(fixed_points):
-    J_evals = Jacobian_eigenvalues(point, a=a, c=c)
+    all_L_evals = [] 
+
+    last = [fixed_points[-1]]
+    for i, point in enumerate(fixed_points):
+        J_evals = Jacobian_eigenvalues(point, a=a, c=c)
     
-    current_L_evals = liouvillian_eigenvalues(J_evals, N_val, saddle)
+        current_L_evals = liouvillian_eigenvalues(J_evals, N_val, saddle)
     
-    # Save the original list to your overall list
-    all_L_evals.append(current_L_evals)
+        all_L_evals.append(current_L_evals)
     
-    # Convert to a NumPy array to enable boolean filtering
-    current_L_evals_arr = np.array(current_L_evals)
+        current_L_evals_arr = np.array(current_L_evals)
     
-    # Filter the current fixed point's eigenvalues by the threshold
-    current_L_evals_filtered = current_L_evals_arr[np.abs(current_L_evals_arr) < abs_threshold]
+        current_L_evals_filtered = current_L_evals_arr[np.abs(current_L_evals_arr) < abs_threshold]
     
-    # Select a color for this specific fixed point
-    fp_color = fp_colors[i % len(fp_colors)]
+        fp_color = fp_colors[i % len(fp_colors)]
     
-    # Plot the filtered eigenvalues for this fixed point
-    plot_spectrum(current_L_evals_filtered, color=fp_color, s=80, filled=False)
+        plot_spectrum(current_L_evals_filtered, color=fp_color, s=80, filled=False, label=f'semiclassics, FP {i+1}: {point.round(2)}', title=f'Liouvillian spectrum: C = {C:.2f}, p = {p}, a = {a}')
 
-all_L_evals = np.concatenate(all_L_evals)
-all_L_evals = all_L_evals[np.abs(all_L_evals) < abs_threshold] 
+    all_L_evals = np.concatenate(all_L_evals)
+    all_L_evals = all_L_evals[np.abs(all_L_evals) < abs_threshold] 
+    if save == True:
+        output_dir = "FPspec&low_spec"
+        os.makedirs(output_dir, exist_ok=True)
 
-plt.show()
+        filename = f"j{j}_C{C:.2f}_p{p}_a{a}_k{k}_N{N_val}.png"
+        filepath = os.path.join(output_dir, filename)
+        plt.savefig(filepath)
+        plt.close() # close everytime
+    plt.show()
 
-
+plot_comparison(evals_num, fixed_points, a, c, N_val, saddle, abs_threshold, j, C, p, save = False)
 
 # checking for degenerate eigenvalues in the spectrum
 '''evals = L.eigenenergies()
