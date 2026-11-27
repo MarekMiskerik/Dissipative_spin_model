@@ -6,8 +6,9 @@ import scipy.linalg as sci
 import time
 import os
 from scipy.sparse.linalg import eigs
-from scipy.sparse import issparse
+import scipy.sparse as sps
 import sympy as sp
+from scipy.sparse.csgraph import connected_components
 
 ## Define parameters
 
@@ -189,6 +190,91 @@ def show_block_diagonalization(L, K, precision=16):
     return block_evals_dict
 
 
+# the three functions below aim to calculate low-lying spectrum, i.e. the eigenvalues nearest to zero 
+
+# convert a QuTiP superoperator to a scipy sparse matrix (works for QuTiP 4 and 5)
+def to_sparse(L):
+    try:
+        # .to('csr') coverts QuTiP 5 superoperator to a compressed sparse row matrix but leave it as a QuTiP object
+        # .data_as('csr_matrix') converts the QuTiP object to a scipy sparse matrix
+        # can probably use onlt data_as('csr_matrix') but this is safer
+        return L.to('csr').data_as('csr_matrix')  # QuTiP 5
+    except AttributeError:
+        return L.data  # QuTiP 4, already a scipy csr matrix
+
+# computes only the k eigenvalues of L
+# sigma slightly off zero, because L has an exact zero eigenvalue (steady state), so (L - 0) would be singular
+def low_lying_spectrum(L, k, sigma=1e-3, eigenvectors=False):
+    Ls = to_sparse(L).tocsc()
+    # k is the number of eigenvalues to compute, sigma is the shift L - sigma*I, which='LM' means we want the eigenvalues with largest magnitude
+    if eigenvectors == False:
+        evals = eigs(Ls, k=k, sigma=sigma, which='LM', return_eigenvectors=False)
+        return evals[np.argsort(-evals.real)]  # sort: slowest decaying first
+    else:
+        evals, evecs = eigs(Ls, k=k, sigma=sigma, which='LM', return_eigenvectors=True)
+        idx = np.argsort(-evals.real)
+        return evals[idx], evecs[:, idx]  # sort: slowest decaying first
+
+
+def low_lying_block_diagonalization(L, K, k, sigma=1e-3):
+    # verify that L and K commute
+    '''comm_norm = commutator(L, K).norm()
+    if comm_norm > 1e-10:
+        raise ValueError("Operators do not commute")'''
+    evalsK, eigvecsK = K.eigenstates()
+
+    L_M = L.transform(eigvecsK) # matrix representation of L in the basis of K
+    L_M = L_M.full() # convert to numpy array
+
+    # dictionary to store the eigenvalues of L mapped to the eigenvalue of K (the block)
+    block_evals_dict = {} 
+
+    # find the sizes of the blocks and the unique eigenvalues of K
+    rounded_evalsK = np.round(evalsK, decimals=5)
+    
+    # capture both the unique eigenvalues and their counts
+    unique_evalsK, block_sizes = np.unique(rounded_evalsK, return_counts=True) 
+    
+    # loop to find the eigenvalues for each block
+    n = 0
+    for k_eval, size in zip(unique_evalsK, block_sizes):
+        block = L_M[n:n+size, n:n+size]
+        
+        evals_block = eigs(block, k=k, sigma=sigma, which='LM', return_eigenvectors=False)
+        
+        evals_block = np.array([complex(val) for val in evals_block])
+
+        # store the L eigenvalues under the corresponding K eigenvalue key
+        block_evals_dict[k_eval] = evals_block
+        n += size
+
+    return block_evals_dict
+
+
+def parity_block_low_lying_spectrum(L, n, k, sigma=1e-3, check=True):
+    def parity_sector_indices(n):
+        """Indices of the vectorized density matrix in each parity sector.
+        n = 2j+1. Column stacking: entry rho[i, k] has index i + n*k,
+        and parity (-1)^(m - m') = (-1)^(i - k)."""
+        idx = np.arange(n * n)
+        i, k = idx % n, idx // n
+        even = idx[(i - k) % 2 == 0]
+        odd = idx[(i - k) % 2 == 1]
+        return even, odd
+    Ls = to_sparse(L)                    # for a QuTiP object, use to_sparse(L)
+    even, odd = parity_sector_indices(n)
+    if check:                                  # the off-diagonal blocks must vanish
+        off = max(abs(Ls[even][:, odd]).max(), abs(Ls[odd][:, even]).max())
+        if off > 1e-12:
+            raise ValueError(f"L does not commute with parity (largest coupling {off:.2e})")
+    out = {}
+    for P, idx in ((+1, even), (-1, odd)):
+        B = Ls[idx][:, idx].tocsc()
+        ev = eigs(B, k=k, sigma=sigma, which='LM', return_eigenvectors=False)
+        out[P] = ev[np.argsort(-ev.real)]
+    return out
+
+
 ## Searching for coincidental eigenvalues in the spectrum
 # coincidental eigenvalues are those that are identical or very close to each other in our case
 # there are two types of coincidental eigenvalues: degenerate and coalescent
@@ -196,6 +282,7 @@ def show_block_diagonalization(L, K, precision=16):
 # coalescent eigenvalues are those that have linearly dependent eigenvectors, i.e. they correspond to nontrivial Jordan blocks
 
 # simple function that just separates the coincidental eigenvalues from the non-coincidental ones
+# was used initially, not used in currect version of the code, but kept for reference
 def spec_separation(evals, threshold): # the threshold should decrease with the system size
     coincidences = np.array([], dtype=complex)
     non_coincidences = np.array([], dtype=complex)
@@ -216,6 +303,7 @@ def spec_separation(evals, threshold): # the threshold should decrease with the 
 
 # a function that finds coincidences and distinguishes coalescences from degeneracies
 # does work only for double coincidences
+# was written by me, but not used in the current version of the code, kept for reference
 def spectrum_double_coincidences(A, coincident_threshold, coalescent_threshold): # the threshold should decrease with the system size
     evals, evecs = A.eigenstates()
 
@@ -258,78 +346,85 @@ def spectrum_double_coincidences(A, coincident_threshold, coalescent_threshold):
 
     return non_coincidens, degenerecies, coalescences
     
-# handles coincidences > 2, i.e. multiple coincidences
-def spectrum_coincidences(A, coincident_threshold, coalescent_threshold):
-    evals, evecs = A.eigenstates()
-    n = len(evals)
 
-    non_coincidences = []
-    degeneracies = []
-    coalescences = []
+def spectrum_coincidences(evals, evecs, coincident_threshold, rank_tol=1e-3):
+    # converts to scipy array if the eigenvectors are QuTiP kets, otherwise assumes they are already in a suitable format
+    if len(evecs) > 0 and hasattr(evecs[0], "full"):
+        evecs = np.column_stack([ket.full().ravel() for ket in evecs])
+    
+    V = evecs / np.linalg.norm(evecs, axis=0) # normalize eigenvectors
+    # evlas[:, None].shape is (1,k) and evlas[None, :].shape is (k,1) 
+    dist = np.abs(evals[:, None] - evals[None, :]) # distance matrix of shape (k,k), zeros on diagonal
+    # dist < coincident_threshold sepresates a boolean matrix or equivalently a graph
+    # connected_components finds a connected elements of this graph
+    # n_comp: number of clusters, label is an array of length k: label[i] is an index of the cluster corresponding to eigenvalue i
+    n_comp, label = connected_components(dist < coincident_threshold, directed=False)
+    #print(dist) 
 
-    # array to track which eigenvalues have already been sorted into a cluster
-    visited = np.zeros(n, dtype=bool)
-
-    for i in range(n):
-        if visited[i]:
+    non_coincidences, degeneracies, coalescences, missing = [], [], [], []
+    singular_values = []
+    for comp in range(n_comp):
+        members = np.where(label == comp)[0] # indeces of eigenvalues in current cluster comp
+        if len(members) == 1: # cluster of size 1 means no coincidences
+            non_coincidences.append(evals[members[0]])
             continue
-
-        # find all eigenvalues within the threshold distance from evals[i] using np.where
-        distances = np.abs(evals - evals[i])
-        cluster_indices = np.where(distances < coincident_threshold)[0] # have to use the zeroth element
-        
-        # mark this entire cluster as processed so we don't evaluate them again
-        visited[cluster_indices] = True
-
-        # separate the clusters into non-coincidences, degeneracies, and coalescences
-        if len(cluster_indices) == 1: # unique eigenvalue
-            non_coincidences.append(evals[i])
+        # returns singular values of eigenvector matrix
+        # compute_uv = False returns only sorted singular values
+        s = np.linalg.svd(V[:, members], compute_uv=False)
+        singular_values.append(s)
+        n_missing = int(np.sum(s < rank_tol * s[0])) # counts how many of the singular values are small compared to the largest one
+        if n_missing == 0: # with no small singular value, the cluster corresponds to degeneracy
+            degeneracies.extend(evals[members])
+            if len(members) > 2:
+                print("degeneracy of order", len(members), "found for eigenvalue", evals[members[0]])
         else:
-            cluster_evals = evals[cluster_indices] # to go through the eigenvalues in the cluster
-            cluster_evecs = evecs[cluster_indices]
-            
-            is_coalescent = False 
-            
-            # check for coalescence by evaluating the overlaps of all pairs of eigenvectors in the cluster
-            for a in range(len(cluster_evecs)):
-                for b in range(a + 1, len(cluster_evecs)):
-                    overlap = cluster_evecs[a].dag() * cluster_evecs[b]
-                    
-                    # If any pair of eigenvectors in this subspace is parallel, it contains a Jordan block
-                    if abs(abs(overlap) - 1) < coalescent_threshold:
-                        is_coalescent = True
-                        break # break inner loop
-                        
-                if is_coalescent:
-                    break # break outer loop
-                    
-            if is_coalescent:
-                coalescences.extend(cluster_evals) # use extend to add all eigenvalues in the cluster
-            else:
-                degeneracies.extend(cluster_evals)
+            coalescences.extend(evals[members])
+            missing.extend([n_missing] * len(members))
 
-    return np.array(non_coincidences), np.array(degeneracies), np.array(coalescences)
-    # would be probably better to define those objects as numpy from the beginning
+    # returns the arrays of non-coincidental eigenvalues, degenerate eigenvalues, coalescent eigenvalues, and the number of missing eigenvectors for each coalescent eigenvalue
+    return (np.array(non_coincidences, dtype=complex),
+            np.array(degeneracies, dtype=complex),
+            np.array(coalescences, dtype=complex),
+            np.array(missing, dtype=int),
+            np.array(singular_values, dtype=float))
+
+def eig_dif(q_evals, clas_evals, zero_tol=1e-2):
+    q = np.asarray(q_evals)
+    cl = np.asarray(clas_evals)
+
+    # remove the steady-state zero eigenvalue(s)
+    q = q[np.abs(q) > zero_tol]
+    cl = cl[np.abs(cl) > zero_tol]
+
+    # Liouvillian gap: slowest-decaying nonzero quantum mode
+    q_gap = q[np.argmin(np.abs(q.real))]
+
+    # classical eigenvalue closest to it in the complex plane
+    cl_match = cl[np.argmin(np.abs(cl - q_gap))]
+
+    return abs(q_gap - cl_match), q_gap, cl_match
 
 
 ## Visualization and analysis of the spectrum
 
 # a procedure to plot some results, mainly for testing purposes
-def spectrum_coincidences_plotting(L, j, coincident_threshold, coalescent_threshold):
+# should be modified to plot the results of te spectrum_coincidences function
+def spectrum_coincidences_plotting(evals, evecs, coincident_threshold, rank_tol=1e-3):
     start = time.time()
-    non_coincidens, degenerecies, coelescences = spectrum_coincidences(L, coincident_threshold, coalescent_threshold)
+    non_coincidens, degenerecies, coelescences, missing = spectrum_coincidences(evals, evecs, coincident_threshold, rank_tol)
     end = time.time()
     print("Time taken to compute and separate the spectrum: ", end - start)
 
-    plt.scatter(non_coincidens.real / j, non_coincidens.imag / j, color='blue', s=4)
-    plt.scatter(degenerecies.real / j, degenerecies.imag / j, color='limegreen', s=4)
-    plt.scatter(coelescences.real / j, coelescences.imag / j, color='red', s=4)
+    plt.scatter(non_coincidens.real, non_coincidens.imag, color='blue', s=4)
+    plt.scatter(degenerecies.real, degenerecies.imag, color='limegreen', s=4)
+    plt.scatter(coelescences[missing == 1].real, coelescences[missing == 1].imag, color='red', s=4)
+    plt.scatter(coelescences[missing > 1].real, coelescences[missing > 1].imag, color='orange', s=4)
     plt.xlabel('Real Part')
     plt.ylabel('Imaginary Part')
     plt.title('Spectrum of the Liouvillian')
     plt.show()
 
-# making plots for different parameters and saving them to a folder
+# making plots of the full spectrum for different parameters and saving them to a folder
 def figure_making(j):
     output_dir = "deg&coa"
     os.makedirs(output_dir, exist_ok=True)
@@ -348,7 +443,7 @@ def figure_making(j):
             for p in ps:
                 for a in aa:
                     L = Liouvillian(s = j, h = 1.0, C = C, p = p, C0 = C0, a = a)
-                    non_coincidens, degenerecies, coelescences = spectrum_coincidences(L, 1e-2, 1e-2)
+                    non_coincidens, degenerecies, coelescences = spectrum_coincidences(L.eigenstates(), 1e-2, 1e-2)
                     plt.scatter(non_coincidens.real / j, non_coincidens.imag / j, color='blue', s=4)
                     plt.scatter(degenerecies.real / j, degenerecies.imag / j, color='limegreen', s=4)
                     plt.scatter(coelescences.real / j, coelescences.imag / j, color='red', s=4)
@@ -390,27 +485,35 @@ def visualize_block_diagonalization(L, K, j):
     plt.show()
 
 
-## the three functions below are used to compute the low-lying spectrum of the Liouvillian
+# visualizes the block diagonalization of L into the two parity sectors
+def visualize_parity_block_diagonalization(L, j, k, sigma=1e-3):
+    n = int(round(2*j + 1))
+    evals_dict = parity_block_low_lying_spectrum(L, n, k=k, sigma=sigma)   # {+1: evals, -1: evals}
+    for i, (key, evals) in enumerate(evals_dict.items()):
 
-# convert a QuTiP superoperator to a scipy sparse matrix (works for QuTiP 4 and 5)
-def to_sparse(L):
-    try:
-        # .to('csr') coverts QuTiP 5 superoperator to a compressed sparse row matrix but leave it as a QuTiP object
-        # .data_as('csr_matrix') converts the QuTiP object to a scipy sparse matrix
-        # can probably use onlt data_as('csr_matrix') but this is safer
-        return L.to('csr').data_as('csr_matrix')  # QuTiP 5
-    except AttributeError:
-        return L.data  # QuTiP 4, already a scipy csr matrix
+        marker_size = 10 + i * 8
 
-# computes only the k eigenvalues of L
-# sigma slightly off zero, because L has an exact zero eigenvalue (steady state), so (L - 0) would be singular
-def low_lying_spectrum(L, k, sigma=1e-3):
-    Ls = to_sparse(L).tocsc()
-    # k is the number of eigenvalues to compute, sigma is the shift L - sigma*I, which='LM' means we want the eigenvalues with largest magnitude
-    evals = eigs(Ls, k=k, sigma=sigma, which='LM', return_eigenvectors=False)
-    #print(issparse(Ls))
-    return evals[np.argsort(-evals.real)]  # sort: slowest decaying first
+        # z-order decreases with each block, ensuring smaller sizes (lower i)
+        # get a higher z-order and stay on top (Default zorder is around 1 or 2)
+        current_zorder = 200 - i
 
+        plt.scatter(
+            evals.real,
+            evals.imag,
+            s=marker_size,
+            zorder=current_zorder,
+            label=f'P = {key:+d}'
+        )
+
+    plt.xlabel('Real Part')
+    plt.ylabel('Imaginary Part')
+
+    plt.legend(loc='best', fontsize='small')
+
+    plt.show()
+
+
+# vizualization of the low-lying spectrum
 def plot_low_lying(L, k, sigma=1e-3, compare_full=False):
     evals = low_lying_spectrum(L, k=k, sigma=sigma)
     if compare_full:
@@ -428,49 +531,187 @@ def plot_low_lying(L, k, sigma=1e-3, compare_full=False):
     return evals
 
 
+# plots both the low-lying spectrum of the Liouvillian and the semiclassical spectrum obtained from the fixed points of the classical dynamics
+# written by Claude
+def plot_comparison0(evals_num, fixed_points, a, c, N_val, abs_threshold, j, C, p, save):
+    all_L_evals = []  
+
+    # common style for all spectrum plots to compare different specra
+    def plot_spectrum(evals, scale=1.0, ax=None, color='blue', s=30, filled=True,
+                  alpha=1.0, label=None, title='Spectrum of the Liouvillian'):
+        if ax is None:
+            ax = plt.gca()
+        # open markers let you see points lying on top of each other
+        style = dict(color=color) if filled else dict(facecolors='none', edgecolors=color)
+        ax.scatter(evals.real / scale, evals.imag / scale, s=s, marker='o',
+                   alpha=alpha, label=label, **style)
+        ax.axhline(y=0, color='k', linestyle='-', linewidth=1, zorder=0)
+        ax.axvline(x=0, color='k', linestyle='-', linewidth=1, zorder=0)
+        if scale == 1.0:
+            ax.set_xlabel('Real Part')
+            ax.set_ylabel('Imaginary Part')
+        else:
+            ax.set_xlabel(r'Real Part / $j$')
+            ax.set_ylabel(r'Imaginary Part / $j$')
+        ax.set_title(title)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.set_aspect('equal', adjustable='datalim')
+        if label is not None:
+            ax.legend()
+        return ax
+
+    plt.figure(figsize=(8, 8))
+
+    plot_spectrum(evals_num, color='red', s=25, label=f'numerics, j = {j}',
+                  title='Low-lying Liouvillian spectrum: numerics vs. semiclassics')
+
+    fp_colors = ['blue', 'green', 'black', 'orange', 'olive', 'magenta', 'brown']
+
+    all_L_evals = [] 
+
+    last = [fixed_points[-1]]
+    for i, point in enumerate(fixed_points):
+        J_evals = Jacobian_eigenvalues(point, a=a, c=c)
+    
+        current_L_evals = liouvillian_eigenvalues(J_evals, N_val)
+    
+        all_L_evals.append(current_L_evals)
+    
+        current_L_evals_arr = np.array(current_L_evals)
+    
+        current_L_evals_filtered = current_L_evals_arr[np.abs(current_L_evals_arr) < abs_threshold]
+    
+        fp_color = fp_colors[i % len(fp_colors)]
+    
+        plot_spectrum(current_L_evals_filtered, color=fp_color, s=80, filled=False, label=f'semiclassics, FP {i+1}: {point.round(2)}', title=f'Liouvillian spectrum: C = {C:.2f}, p = {p}, a = {a}')
+
+    all_L_evals = np.concatenate(all_L_evals)
+    all_L_evals = all_L_evals[np.abs(all_L_evals) < abs_threshold] 
+    if save == True:
+        output_dir = "FPspec&low_spec"
+        os.makedirs(output_dir, exist_ok=True)
+
+        filename = f"j{j}_C{C:.2f}_p{p}_a{a}_k{k}_N{N_val}.png"
+        filepath = os.path.join(output_dir, filename)
+        plt.savefig(filepath)
+        plt.close() # close everytime
+    plt.show()
+
+
+def plot_comparison(evals_num, fixed_points, a, c, N_val, abs_threshold, j, C, p, k,
+                    save=False, evecs_num=None,
+                    coincident_threshold=1e-2, rank_tol=1e-2,
+                    output_dir="low_lying_all_inclusive"):
+
+    # common style for all spectrum plots to compare different spectra
+    def plot_spectrum(evals, scale=1.0, ax=None, color='blue', s=30, filled=True,
+                      alpha=1.0, label=None, title='Spectrum of the Liouvillian'):
+        if ax is None:
+            ax = plt.gca()
+        evals = np.asarray(evals)
+        # open markers let you see points lying on top of each other
+        style = dict(color=color) if filled else dict(facecolors='none', edgecolors=color)
+        ax.scatter(evals.real / scale, evals.imag / scale, s=s, marker='o',
+                   alpha=alpha, label=label, **style)
+        ax.axhline(y=0, color='k', linestyle='-', linewidth=1, zorder=0)
+        ax.axvline(x=0, color='k', linestyle='-', linewidth=1, zorder=0)
+        if scale == 1.0:
+            ax.set_xlabel('Real Part')
+            ax.set_ylabel('Imaginary Part')
+        else:
+            ax.set_xlabel(r'Real Part / $j$')
+            ax.set_ylabel(r'Imaginary Part / $j$')
+        ax.set_title(title)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.set_aspect('equal', adjustable='datalim')
+        if label is not None:
+            ax.legend()
+        return ax
+
+    title = f'Liouvillian spectrum: j = {j}, C = {C:.2f}, p = {p}, a = {a}'
+    plt.figure(figsize=(8, 8))
+
+    # --- numerics -------------------------------------------------------
+    if evecs_num is None:
+        # no eigenvectors -> plain numerics as before
+        plot_spectrum(evals_num, color='red', s=25, label=f'numerics, j = {j}', title=title)
+    else:
+        non_coinc, degen, coal, missing, _ = spectrum_coincidences(
+            evals=evals_num, evecs=evecs_num,
+            coincident_threshold=coincident_threshold, rank_tol=rank_tol)
+
+        categories = [
+            (non_coinc,             'black',   'non-coincidences'),
+            (degen,                 'lime',   'degeneracies'),
+            (coal[missing == 1],    'orange',    'coalescences'),
+            (coal[missing > 1],     'pink', 'coalescences (higher order)'),
+        ]
+        for vals, col, lab in categories:
+            if len(vals) > 0:   # avoid empty legend entries
+                plot_spectrum(vals, color=col, s=25, label=lab, title=title)
+
+    # --- semiclassics ---------------------------------------------------
+    # colours chosen so they don't clash with the numerical categories
+    fp_colors = ['brown', 'red', 'blue', 'purple', 'gray', 'olive', 'lime']
+
+    all_L_evals = []
+    for i, point in enumerate(fixed_points):
+        J_evals = Jacobian_eigenvalues(point, a=a, c=c)
+        L_evals = np.asarray(liouvillian_eigenvalues(J_evals, N_val))
+        all_L_evals.append(L_evals)
+
+        L_evals = L_evals[np.abs(L_evals) < abs_threshold]
+        plot_spectrum(L_evals, color=fp_colors[i % len(fp_colors)], s=80, filled=False,
+                      label=f'semiclassics, FP {i+1}: {np.round(point, 2)}', title=title)
+
+    if save:
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"j{j}_C{C:.2f}_p{p}_a{a}_k{k}_N{N_val}.png"
+        plt.savefig(os.path.join(output_dir, filename))
+        plt.close()
+    else:
+        plt.show()
 
 
 '''function imported from 'classical_dynamics.py' to compute the eigenvalues of the Liouvillian from the eigenvalues of the Jacobian at a fixed point'''
-def liouvillian_eigenvalues(J_eigenvalues, n_max, saddle): # if saddle is True, then consider eigenvalues of a saddle fixed point as well
-    if len(J_eigenvalues) < 2:
-        if J_eigenvalues[0].real > 0:
-            return np.array([0])
-        else:
-            s = [n * J_eigenvalues[0] for n in range(n_max + 1)]
-            return np.array(s)
-    if saddle:
-        if J_eigenvalues[0].real > 0 and J_eigenvalues[1].real > 0:
-            return np.array([0])
-        else:
-            s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
-            return np.array(s)
-    else:
-        if J_eigenvalues[0].real > 0 or J_eigenvalues[1].real > 0:
-            #s = [-n1 * J_eigenvalues[0] - n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
-            #return np.array(s)
-            return np.array([0])
-        else:
-            s = [n1 * J_eigenvalues[0] + n2 * J_eigenvalues[1] for n1 in range(n_max + 1) for n2 in range(n_max + 1 - n1)]
-            return np.array(s)
+from itertools import product
+def liouvillian_eigenvalues(J_eigenvalues, n_max):
+    lam = np.asarray(J_eigenvalues, dtype=complex)
 
-def Jacobian_eigenvalues(point, a, c, h = 1):
-    sp_j1, sp_j2, sp_j3 = sp.symbols('j1 j2 j3')
-    sp_h, sp_a, sp_c = sp.symbols('h a c')
+    unstable = lam.real > 0
+    # unstable directions get shifted by +1
+    shift = unstable.astype(int)
+    sign = np.where(unstable, -1.0, 1.0)
 
-    eq1 = - sp_h * sp_j2 + sp_c * sp_j1 * sp_j3
-    eq2 = sp_h * sp_j1 + 2 * sp_a * sp_j1 * sp_j3 + sp_c * sp_j2 * sp_j3
-    eq3 = - 2 * sp_a * sp_j1 * sp_j2 - sp_c * (sp_j1 ** 2 + sp_j2 ** 2)
+    s = []
+    for m in product(range(n_max + 1), repeat=len(lam)):
+        if sum(m) <= n_max:
+            s.append(np.sum(sign * (np.array(m) + shift) * lam))
+    return np.array(s)
 
-    J = np.array([[sp.diff(eq1, var) for var in (sp_j1, sp_j2, sp_j3)],
-                  [sp.diff(eq2, var) for var in (sp_j1, sp_j2, sp_j3)],
-                  [sp.diff(eq3, var) for var in (sp_j1, sp_j2, sp_j3)]])
 
-    replacements = {sp_h: h, sp_a: a, sp_c: c, sp_j1: point[0], sp_j2: point[1], sp_j3: point[2]}
-    J_numeric = np.array([[entry.subs(replacements).evalf() for entry in row] for row in J], dtype=float)
+def Jacobian_eigenvalues(point, a, c, h=1.0):
 
-    eigenvalues = np.linalg.eigvals(J_numeric)
-    eigenvalues  = np.delete(eigenvalues, np.where(np.isclose(eigenvalues, 0, atol=1e-12)))
-    return eigenvalues
+    def jacobian(point, a, c, h=1.0):
+        j1, j2, j3 = point
+        return np.array([
+            [c*j3,               -h,                 c*j1],
+            [h + 2*a*j3,          c*j3,              2*a*j1 + c*j2],
+            [-2*a*j2 - 2*c*j1,   -2*a*j1 - 2*c*j2,   0.0]
+        ])
+    
+    J = jacobian(point, a, c, h)
+
+    def tangent_basis(point):
+        n = np.asarray(point, dtype=float)
+        n = n / np.linalg.norm(n)
+        # The last two right-singular vectors of n^T span the plane orthogonal to n
+        _, _, Vt = np.linalg.svd(n[None, :])
+        return Vt[1:].T          # shape (3, 2), orthonormal columns
+    
+    P = tangent_basis(point)
+    J_tan = P.T @ J @ P      # 2x2 Jacobian restricted to the sphere
+    return np.linalg.eigvals(J_tan)
 
 def find_fixed_points(a, c, h = 1, tol=1e-12):
     pts = [(0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]           # always fixed points
@@ -499,114 +740,106 @@ def find_fixed_points(a, c, h = 1, tol=1e-12):
                     pts.append((s*np.cos(phi), s*np.sin(phi), 0.0))
 
     return np.unique(np.round(np.array(pts), 14), axis=0)   # shape (n, 3), real points only
-''''''
 
-# common style for all spectrum plots to compare different specra
-def plot_spectrum(evals, scale=1.0, ax=None, color='blue', s=30, filled=True,
-                  alpha=1.0, label=None, title='Spectrum of the Liouvillian'):
-    if ax is None:
-        ax = plt.gca()
-    # open markers let you see points lying on top of each other
-    style = dict(color=color) if filled else dict(facecolors='none', edgecolors=color)
-    ax.scatter(evals.real / scale, evals.imag / scale, s=s, marker='o',
-               alpha=alpha, label=label, **style)
-    ax.axhline(y=0, color='k', linestyle='-', linewidth=1, zorder=0)
-    ax.axvline(x=0, color='k', linestyle='-', linewidth=1, zorder=0)
-    if scale == 1.0:
-        ax.set_xlabel('Real Part')
-        ax.set_ylabel('Imaginary Part')
-    else:
-        ax.set_xlabel(r'Real Part / $j$')
-        ax.set_ylabel(r'Imaginary Part / $j$')
-    ax.set_title(title)
-    ax.grid(True, linestyle='--', alpha=0.6)
-    ax.set_aspect('equal', adjustable='datalim')
-    if label is not None:
-        ax.legend()
-    return ax
+def classical_spectrum(fixed_points, a, c, N_val):
+    return np.concatenate([
+        liouvillian_eigenvalues(Jacobian_eigenvalues(pt, a=a, c=c), N_val)
+        for pt in fixed_points
+    ])
+''''''
 
 
 j = 100
 
 a = 0.3
-C = 0.5050505050505050
+c = 0.5
 p = 0.99
 
-L = Liouvillian(s = j, h = 1.0, C = C, p = p, C0 = 0.0, a = a)
+C = c / p
 
-#plot_low_lying(L, k=40, compare_full=False)  # compare_full=True is a check for small j
 
-c = C * p
-
-saddle = True
-k = 60 # number of low-lying eigenvalues to compute from the Liouvillian
+k = 50 # number of low-lying eigenvalues to compute from the Liouvillian
 
 N_val = 10 # corresponds to a number of eigenvalues to compute from the semiclassical spectrum
 abs_threshold = 10 # threshold for the absolute value of eigenvalues to keep in the semiclassical spectrum
 
-
-# block below plots both the low-lying spectrum of the Liouvillian and the semiclassical spectrum obtained from the fixed points of the classical dynamics
-# written by Claude
 fixed_points = find_fixed_points(a=a, c=c)
 #fixed_points = np.delete(fixed_points, 1)
 
-all_L_evals = []  
+AS = [a] #np.linspace(0.50425, 0.50429, 15)  # range of a values to loop over
 
-evals_num = low_lying_spectrum(L, k=k)
+for A in AS:
+    fixed_points = find_fixed_points(a=A, c=c)   # fixed points change with a
+    L = Liouvillian(s=j, h=1.0, C=C, p=p, C0=0.0, a=A)
+    evals_num, evecs_num = low_lying_spectrum(L, k=k, eigenvectors=True)
 
-evals_coincidences, evals_non_coincidences = spec_separation(evals_num, threshold=1e-2)
+    plot_comparison(evals_num, fixed_points, A, c, N_val, abs_threshold, j, C, p, k,
+                    evecs_num=evecs_num, save=False,
+                    output_dir="../Plots/low_lying_all_inclusive")
+    visualize_parity_block_diagonalization(L, j, k, sigma=1e-3)
 
-def plot_comparison(evals_num, fixed_points, a, c, N_val, saddle, abs_threshold, j, C, p, save):
-    plt.figure(figsize=(8, 8))
 
-    plot_spectrum(evals_num, color='red', s=25, label=f'numerics, j = {j}',
-                  title='Low-lying Liouvillian spectrum: numerics vs. semiclassics')
+'''clas_evals = classical_spectrum(fixed_points, a, c, N_val)
 
-    fp_colors = ['blue', 'green', 'black', 'orange', 'olive', 'magenta', 'brown']
+js = [] #[20, 40, 60, 80, 100, 150, 200]
+difs = []
+for j in js:
+    L = Liouvillian(s=j, h=1.0, C=C, p=p, C0=0.0, a=a)
+    q_evals = low_lying_spectrum(L, k=k)
+    dif, q_gap, cl_match = eig_dif(q_evals, clas_evals)
+    difs.append(dif)
+    print(j, q_gap, cl_match, dif)
 
-    all_L_evals = [] 
+slope, intercept = np.polyfit(np.log(js), np.log(difs), 1)
+print(f"slope = {slope:.3f}")   # dif ~ j**slope
 
-    last = [fixed_points[-1]]
-    for i, point in enumerate(fixed_points):
-        J_evals = Jacobian_eigenvalues(point, a=a, c=c)
-    
-        current_L_evals = liouvillian_eigenvalues(J_evals, N_val, saddle)
-    
-        all_L_evals.append(current_L_evals)
-    
-        current_L_evals_arr = np.array(current_L_evals)
-    
-        current_L_evals_filtered = current_L_evals_arr[np.abs(current_L_evals_arr) < abs_threshold]
-    
-        fp_color = fp_colors[i % len(fp_colors)]
-    
-        plot_spectrum(current_L_evals_filtered, color=fp_color, s=80, filled=False, label=f'semiclassics, FP {i+1}: {point.round(2)}', title=f'Liouvillian spectrum: C = {C:.2f}, p = {p}, a = {a}')
+js_arr = np.array(js)
+plt.loglog(js, difs, 'o', label='data')
+plt.loglog(js_arr, np.exp(intercept) * js_arr**slope, '--',
+           label=f'fit: slope = {slope:.2f}')
+plt.legend()
+plt.xlabel('$j$')
+plt.ylabel(r'$|\Lambda - \Lambda^{\rm cl}|$')
+#plt.grid(True, which='both', linestyle='--', alpha=0.6)
+plt.show()'''
 
-    all_L_evals = np.concatenate(all_L_evals)
-    all_L_evals = all_L_evals[np.abs(all_L_evals) < abs_threshold] 
-    if save == True:
-        output_dir = "FPspec&low_spec"
-        os.makedirs(output_dir, exist_ok=True)
 
-        filename = f"j{j}_C{C:.2f}_p{p}_a{a}_k{k}_N{N_val}.png"
-        filepath = os.path.join(output_dir, filename)
-        plt.savefig(filepath)
-        plt.close() # close everytime
-    plt.show()
+'''for a in AS:
+    L = Liouvillian(s = j, h = 1.0, C = C, p = p, C0 = 0.0, a = a)
+    time_start = time.time()
+    evals_num, evecs_num = low_lying_spectrum(L, k=k, eigenvectors=True)
+#print("Low-lying eigenvalues of the Liouvillian:", evals_num)
+#print("Low-lying eigenvectors of the Liouvillian:", evecs_num)
+    time_end = time.time()
+    #print(f"Time taken to compute the low-lying spectrum: {time_end - time_start} seconds")
 
-plot_comparison(evals_num, fixed_points, a, c, N_val, saddle, abs_threshold, j, C, p, save = False)
+    time_start = time.time()
+    non_coincidences, degeneracies, coalescences, missing, singular_values = spectrum_coincidences(evals=evals_num, evecs=evecs_num, coincident_threshold=1e-2, rank_tol=1e-2)
+    time_end = time.time()
+    #print(f"Time taken to separate the spectrum: {time_end - time_start} seconds")
+    #print(singular_values)
 
-# checking for degenerate eigenvalues in the spectrum
-'''evals = L.eigenenergies()
-evals = np.round(evals, decimals=2)
-unique_evals, counts = np.unique(evals, return_counts=True)
+    plt.scatter(non_coincidences.real, non_coincidences.imag, c='blue', label='non-coincidences')
+    plt.scatter(degeneracies.real, degeneracies.imag, c='lime', label='degeneracies')
+    plt.scatter(coalescences[missing == 1].real, coalescences[missing == 1].imag, c='red', label='coalescences')
+    plt.scatter(coalescences[missing > 1].real, coalescences[missing > 1].imag, c='orange', label='coalescences (higher order)')
+    plt.title(f'Low-lying spectrum: j = {j}, C = {C:.2f}, p = {p}, a = {a}')
+    plt.xlabel('Real Part')
+    plt.ylabel('Imaginary Part')
+    plt.legend()
+    output_dir = "../Plots/low-lying_coincidences"
+    os.makedirs(output_dir, exist_ok=True)
 
-for eval, count in zip(unique_evals, counts):
-    print(f"Eigenvalue: {eval}, Count: {count}")
-b = True
-for count in counts:
-    if count > 1:
-        print(f"Degenerate eigenvalue found with count: {count}")
-        b = False
-if b:
-    print("No degenerate eigenvalues found.")'''
+    filename = f"j{j}_C{C:.2f}_p{p}_a{a}_k{k}.png"
+    filepath = os.path.join(output_dir, filename)
+    plt.savefig(filepath)
+    plt.close() # close everytime
+    plt.show()'''
+
+#L = Liouvillian(s = j, h = 1.0, C = C, p = p, C0 = 0.0, a = a)
+#visualize_parity_block_diagonalization(L, j, k, sigma=1e-3)
+#evals, evecs = L.eigenstates()
+#spectrum_coincidences_plotting(evals, evecs, coincident_threshold=0.05, rank_tol=1e-2)
+
+# NOTE: ansatz L(a) = L0 + a * L1 where L1 corresponds to interaction term in Hamiltonian commutator -1/j*[J_x^2, ...]
+# This allows us to constuct L0, L1 once as scipy sparce matrices and speed up the calculation
